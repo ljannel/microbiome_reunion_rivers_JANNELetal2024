@@ -1,0 +1,425 @@
+---
+title: "Microbiome_analysis"
+author: "JANNEL"
+date: "2024-10-04"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+# I- Datas preparation
+## 1. Import data
+
+```{r pressure, echo=FALSE}
+set.seed(123)
+input <- "otu_table_microbiome_reunion_rivers_JANNELetal2024.csv"
+metadata <- "metadata_microbiome_reunion_rivers_JANNELetal2024.tsv"
+
+metadata2 <-read_tsv(metadata)
+
+taxonomic_levels <- c("Kingdom","Phylum", "Class",
+                      "Order", "Family", "Genus", "Species")
+
+otu_data <- read_csv2(input) %>%
+  dplyr::rename(OTU = observation_name) %>%
+  select(-blast_taxonomy, -sequence)
+```
+
+## 2. Preparing phyloseq objects
+
+```{r pressure, echo=FALSE}
+# taxonomy data
+tax_data <- read_delim(input, delim = ";", show_col_types = FALSE) %>%
+  dplyr::rename(OTU = observation_name, taxonomy = blast_taxonomy) %>% 
+  separate(taxonomy, into = taxonomic_levels, sep = "[;]", fill = "right", extra = "drop") %>%
+  mutate_if(is.character, ~ str_replace(., "unknown|metagenome|uncultured|unidentified|\\*", NA_character_)) %>%
+  mutate(taxonomy = str_glue_data(.,
+                                  "Root;k__{Kingdom}",
+                                  ";p__{Phylum}",
+                                  ";c__{Class}",
+                                  ";o__{Order}",
+                                  ";f__{Family}",
+                                  ";g__{Genus}",
+                                  ";s__{Species}",
+                                  ";ss__{OTU}",
+                                  sep = "|")) %>%
+  mutate(taxonomy = as.character(taxonomy))
+
+# sample data 
+meta <-  metadata2 %>% 
+  tibble::column_to_rownames(var = "code_station")
+
+sample_data <- meta 
+
+# Phyloseq object : otu, tax et physeq 
+otu <- otu_data %>% 
+  mutate(OTU=as.character(OTU)) %>%
+  column_to_rownames(var = "OTU") %>%
+  as.matrix() 
+
+tax <- tax_data %>% 
+  mutate(OTU=as.character(OTU)) %>%
+  column_to_rownames(var = "OTU") %>% 
+  as.matrix()
+
+physeq <- phyloseq(otu_table(otu, taxa_are_rows = TRUE), tax_table(tax), sample_data(sample_data))
+```
+
+## 3. Decontamination steps (remove control)
+
+```{r setup, include=FALSE}
+# 3.1 Removal of minority OTUs, i.e. those appearing no more than 10 times in 20% of samples
+filter <- phyloseq::genefilter_sample(physeq, filterfun_sample(function(x) x >= 10), A = 0.02*nsamples(physeq))
+physeq_filtered <- prune_taxa(filter, physeq)
+physeq_rare2 <- physeq_filtered
+
+# 3.2. Decontamination stage using the physeq_rare2 object  
+# Subtraction of the controls from the sample reads for the respective campaigns. 
+allOTUs<-as.data.frame(otu_table(physeq_rare2, taxa_are_rows=TRUE))
+## C1_T
+col_to_subtract <- "C1_T"
+otu_sub <- allOTUs %>%
+  mutate(across(starts_with("C1"), ~ ifelse((. - !!sym(col_to_subtract)) < 0, 0, . - !!sym(col_to_subtract))))
+
+## C2_T 
+col_to_subtract <- "C2_T"
+otu_sub <- otu_sub %>%
+  mutate(across(starts_with("C2"), ~ ifelse((. - !!sym(col_to_subtract)) < 0, 0, . - !!sym(col_to_subtract))))
+
+## C3_T
+col_to_subtract <- "C3_T"
+otu_sub <- otu_sub %>%
+  mutate(across(starts_with("C3"), ~ ifelse((. - !!sym(col_to_subtract)) < 0, 0, . - !!sym(col_to_subtract))))
+
+## C4_T
+col_to_subtract <- "C4_T"
+otu_sub <- otu_sub %>%
+  mutate(across(starts_with("C4"), ~ ifelse((. - !!sym(col_to_subtract)) < 0, 0, . - !!sym(col_to_subtract))))
+
+## BL (PCR control)
+col_to_subtract <- "BL"
+otu_sub <- otu_sub %>%
+  mutate(across(starts_with("C"), 
+    ~ ifelse((. - !!sym(col_to_subtract)) < 0, 0, . - !!sym(col_to_subtract))))
+
+# Phyloseq object : otu, tax et physeq 
+otu <- otu_sub %>%
+  as.matrix()
+
+tax <- tax_data %>% 
+  mutate(OTU=as.character(OTU)) %>%
+  column_to_rownames(var = "OTU") %>% 
+  as.matrix()
+
+physeq <- phyloseq(otu_table(otu, taxa_are_rows = TRUE), tax_table(tax), sample_data(sample_data))
+
+# 3.3. Eliminating contaminating reads 
+bad_otu= c("Cluster_1")
+goodTaxa <- setdiff(taxa_names(physeq), bad_otu)
+physeq <- prune_taxa(goodTaxa, physeq)
+
+# 3.4. Bacteria targeting
+physeq_rare <- subset_taxa(physeq, Kingdom =="Bacteria") 
+
+# 3.5. Subset control sample
+physeq_rare2 <- physeq_filtered %>% 
+  subset_samples(sampling !="control")
+```
+
+# II - Diversity analysis
+
+## 1. Venn Diagramm
+
+```{r pressure, echo=FALSE}
+library(ggvenn)
+physeq_df <- psmelt(physeq_rare2)
+
+# at OTU level
+number_of_taxa <- physeq_df %>% 
+  filter(Abundance > 0) %>% 
+  group_by(matrice, OTU) %>% 
+  summarise(n = length(Abundance))
+
+venn_data <- list(water = unique(number_of_taxa$OTU[number_of_taxa$matrice == "water"]),
+                  sediments = unique(number_of_taxa$OTU[number_of_taxa$matrice == "sediments"]),
+                  intestines =  unique(number_of_taxa$OTU[number_of_taxa$matrice == "intestines"]))
+ggvenn(
+  venn_data,
+  columns = NULL,
+  show_elements = FALSE,
+  show_percentage = TRUE,
+  digits = 1,
+  fill_color = c("blue", "yellow", "green"),
+  fill_alpha = 0.5,
+  stroke_color = "black",
+  stroke_alpha = 1,
+  stroke_size = 1,
+  stroke_linetype = "solid",
+  set_name_color = "black",
+  set_name_size = 8,
+  text_color = "black",
+  text_size = 6,
+  label_sep = ",",
+  count_column = NULL,
+  show_outside = c("auto", "none", "always"),
+  auto_scale = FALSE)
+```
+
+## 2. All matrices
+
+```{r pressure, echo=FALSE}
+# 2.1. Alpha Diversity
+hmp.div <- alpha(physeq_rare2, index = "all")
+datatable(hmp.div)
+hmp.meta <- meta(physeq_rare2)
+
+# Add the rownames as a new colum for easy integration later.
+hmp.meta$sam_name <- rownames(hmp.meta)
+
+# Add the rownames to diversity table
+hmp.div$sam_name <- rownames(hmp.div)
+
+# merge these two data frames into one
+div.df <- merge(hmp.div,hmp.meta, by = "sam_name")
+
+# check the tables
+colnames(div.df)
+div.df2 <- div.df[, c("matrice", "observed", "chao1")]
+
+## Kruskall Wallis comparison of means test to show differences between groups
+kruskal.test(chao1 ~ matrice, data=div.df2)
+kruskal.test(observed ~ matrice, data=div.df2)
+
+# Duncan's post-hoc test to find out which group differs
+observed_result <- aov(observed ~ matrice, data=div.df2)
+duncan.test(observed_result,"matrice",alpha=0.05,console=TRUE)
+
+chao_result<- aov(chao1 ~ matrice, data=div.df2) 
+duncan.test(chao_result,"matrice",alpha=0.05,console=TRUE)
+
+# 2.2. Beta diversity
+ord <- ordinate(physeq_rare2,"PCoA","bray")
+
+dist <-  physeq_rare2 %>% transform_sample_counts(function(x) x/sum(x)) %>%
+  otu_table() %>%
+  t() %>%
+  sqrt() %>%
+  as.data.frame() %>%
+  vegdist(binary=F, method = "bray")
+
+
+## Effects of different parameters on bacterial composition
+# PERMANOVA : matrix effect
+adonis(dist ~ get_variable(physeq_rare2, "matrice"),permutations = 999)$aov.tab
+
+# PERMANOVA : sampling effect
+adonis(dist ~ get_variable(physeq_rare2, "sampling"),permutations = 999)$aov.tab
+
+# PERMANOVA : watershed effect
+adonis(dist ~ get_variable(physeq_rare2, "watershed"),permutations = 999)$aov.tab
+
+# PERMANOVA : effect of site location  
+adonis(dist ~ get_variable(physeq_rare2, "site"),permutations = 999)$aov.tab
+
+# PERMANOVA : effect of interaction between matrix and sampling campaign
+adonis(dist ~ get_variable(physeq_3, "matrice") * get_variable(physeq_3, "sampling") ,permutations = 999)$aov.tab
+
+# PERMANOVA : effect of interaction between matrix and watershed
+adonis(dist ~ get_variable(physeq_rare2, "matrice") * get_variable(physeq_3, "watershed") ,permutations = 999)$aov.tab
+
+# PERMANOVA : effect of the interaction between matrix and site localisation
+adonis(dist ~ get_variable(physeq_rare2, "matrice") * get_variable(physeq_3, "site") ,permutations = 999)$aov.tab
+
+# PERMANOVA : effect of the interaction between sampling and watershed
+adonis(dist ~ get_variable(physeq_rare2, "sampling") * get_variable(physeq_3, "watershed") ,permutations = 999)$aov.tab  
+
+# PERMANOVA : effect of the interaction between sampling and site localisation
+adonis(dist ~ get_variable(physeq_rare2, "sampling") * get_variable(physeq_3, "site") ,permutations = 999)$aov.tab  
+
+# PERMANOVA : effect of the interaction between watershed and site localisation
+adonis(dist ~ get_variable(physeq_rare2, "watershed") * get_variable(physeq_3, "site") ,permutations = 999)$aov.tab  
+
+### 2)  Visualisation 
+p2 <- plot_ordination(physeq_rare2, 
+                      ord,
+                      type="samples",
+                      color = "matrice", 
+                      title = "Bacterial communities - Bray Curtis",
+                      shape = "watershed") +   theme_bw() + 
+  scale_color_manual(values=c("#d43ed2", "#dae411","#3399FF","#25ebe2","#3be411","#FF9000","#0c635f","#410c63","#f38787", "#990000","#f9f504","#0d226c", "#1b5711", "#a34f5d"), name="matrice")+
+  theme(text = element_text(size = 22)) + 
+  geom_point(size = 3) +
+  theme(legend.key.size = unit(0.5, "cm"),
+        legend.key.width = unit(0.5,"cm") ) 
+p2
+
+
+```
+
+## 3. Each matrices
+
+```{r pressure, echo=FALSE}
+analyze_physeq <- function(physeq_rare2, matrice) {
+  # Filtrer selon le type de matrice (water, , intestines)
+  physeq_filtered <- subset_samples(physeq_rare2, matrice == matrice)
+  
+  ## Alpha diversity
+  hmp.div <- alpha(physeq_filtered, index = "all")
+  datatable(hmp.div)
+  hmp.meta <- meta(physeq_filtered)
+  
+  # Add rownames as a new column
+  hmp.meta$sam_name <- rownames(hmp.meta)
+  hmp.div$sam_name <- rownames(hmp.div)
+  
+  # Merging the two data tables
+  div.df <- merge(hmp.div, hmp.meta, by = "sam_name")
+  
+  # Extract columns of interest
+  div.df2 <- div.df[, c("watershed", "observed", "chao1")]
+  
+  # Kruskall Wallis test
+  kruskal_obs <- kruskal.test(observed ~ watershed, data = div.df2)
+  kruskal_chao <- kruskal.test(chao1 ~ watershed, data = div.df2)
+  
+  # Return results
+  list(kruskal_obs = kruskal_obs, kruskal_chao = kruskal_chao, div_df2 = div.df2)
+ 
+  # Duncan's post-hoc test to find out which group differs
+  observed_result <- aov(observed ~ watershed, data=div.df2)
+  duncan.test(observed_result,"watershed",alpha=0.05,console=TRUE)
+  
+  chao_result<- aov(chao1 ~ watershed, data=div.df2) 
+  duncan.test(chao_result,"watershed",alpha=0.05,console=TRUE)
+  
+  ## Beta diversity
+  ord <- ordinate(physeq_filtered,"PCoA","bray")
+  
+  dist <-  physeq_filtered %>% transform_sample_counts(function(x) x/sum(x)) %>%
+    otu_table() %>%
+    t() %>%
+    sqrt() %>%
+    as.data.frame() %>%
+    vegdist(binary=F, method = "bray")
+  
+  plot_ordination(physeq_filtered, 
+                  ord,
+                  type="samples",
+                  color = "watershed", 
+                  title = "Bacterial communities") +   theme_bw() + 
+    scale_color_manual(values=c("#3399FF", "#dae411","#3be411","#25ebe2", "#d43ed2",  "#FF9000","#0c635f","#410c63","#f38787", "#990000","#f9f504","#0d226c", "#1b5711", "#a34f5d"), name="watershed")+
+    theme(text = element_text(size = 22)) + 
+    geom_point(size = 3) +
+    theme(legend.key.size = unit(0.5, "cm"),
+          legend.key.width = unit(0.5,"cm") ) + stat_ellipse()
+  
+  ## Effects of different parameters on bacterial composition
+  # PERMANOVA : matrix effect
+  adonis(dist ~ get_variable(physeq_filtered, "watershed"),permutations = 999)$aov.tab
+  
+  # PERMANOVA : sampling effect
+  adonis(dist ~ get_variable(physeq_filtered, "sampling"),permutations = 999)$aov.tab
+  
+  # PERMANOVA : effect of site location 
+  adonis(dist ~ get_variable(physeq_filtered, "site"),permutations = 999)$aov.tab
+  
+  # PERMANOVA :effect of interaction between watershed and sampling campaign
+  adonis(dist ~ get_variable(physeq_filtered, "watershed") * get_variable(physeq_filtered, "sampling") ,permutations = 999)$aov.tab
+  
+  # PERMANOVA : effect of the interaction between matrix and type
+  adonis(dist ~ get_variable(physeq_filtered, "watershed") * get_variable(physeq_filtered, "site") ,permutations = 999)$aov.tab
+  
+  # PERMANOVA : effect of the interaction between sampling and type
+  adonis(dist ~ get_variable(physeq_filtered, "sampling") * get_variable(physeq_filtered, "site") ,permutations = 999)$aov.tab  
+  
+  # PERMANOVA : effet de l'interaction entre bv et type 
+  adonis(dist ~ get_variable(physeq_filtered, "watershed") * get_variable(physeq_filtered, "site") ,permutations = 999)$aov.tab  
+  
+}
+
+# Analysis for the physeq_water object
+results_water <- analyze_physeq(physeq_rare2, "water")
+
+# Analysis for the physeq_sed object
+results_sed <- analyze_physeq(physeq_rare2, "sediments")
+
+# Analysis for the physeq_int object
+results_int <- analyze_physeq(physeq_rare2, "intestines")
+
+```
+
+# II - Bacterial composition
+
+## 1. At Phylum level
+
+```{r pressure, echo=FALSE}
+colours <- c("#F0A3FF", "#0075DC", "#993F00","#4C005C","#2BCE48","#FFCC99",
+             "#808080","#94FFB5","#8F7C00","#9DCC00","#C20088","#003380",
+             "#FFA405","#FFA8BB","#426600","#FF0010","#5EF1F2","#00998F","#740AFF",
+             "#990000","#FFFF00","aquamarine","bisque4","blueviolet","chocolate","cyan3","deeppink","darkgrey","chartreuse","black")
+
+toplot=NULL
+n=30
+
+toplot <- physeq_rare2 %>%
+  tax_glom(taxrank = "Phylum") %>%                     # agglomerate at Phylum level
+  transform_sample_counts(function(x) {x/sum(x)} ) #%>% # Transform to rel. abundance
+
+toplot <- prune_samples(sample_sums(toplot)>=1, toplot) #remove otu with 0 reads 
+
+toplot2 <-  prune_taxa(names(sort(taxa_sums(toplot), TRUE)[1:n]),toplot) %>%
+  subset_taxa(Phylum != "unknown Phylum") %>% 
+  psmelt()   
+
+## Representation of the most abundant phylum according to matrices
+ggplot(toplot2, aes(x = Sample, y = Abundance, fill = Phylum)) + 
+  facet_grid(. ~ matrice, drop=TRUE,scale="free",space="free_x") +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = colours) +
+  theme_bw() +
+  guides(fill=guide_legend(ncol=1)) +
+  theme(axis.title.x = element_blank()) +
+  theme(axis.text.x=element_text(angle=75,hjust=0,vjust=0)) +
+  ylab(paste0("Relative Abundance"))+ 
+  theme(axis.text.x = element_text(angle=90, size = 7),legend.text = element_text( size = 7),legend.key.size = unit(0.3, "cm"),
+        legend.key.width = unit(0.3,"cm") )
+
+
+```
+
+## 2. At genus level
+
+```{r pressure, echo=FALSE}
+colours <- c("#F0A3FF", "#0075DC", "#993F00","#4C005C","#2BCE48","#FFCC99",
+             "#808080","#94FFB5","#8F7C00","#9DCC00","#C20088","#003380",
+             "#FFA405","#FFA8BB","#426600","#FF0010","#5EF1F2","#00998F","#740AFF",
+             "#990000","#FFFF00","aquamarine","bisque4","blueviolet","chocolate","cyan3","deeppink","darkgrey","chartreuse","black")
+
+toplot=NULL
+n=30
+
+toplot <- physeq_rare2 %>%
+  tax_glom(taxrank = "Genus") %>%                     # agglomerate at Genus level
+  transform_sample_counts(function(x) {x/sum(x)} ) #%>% # Transform to rel. abundance
+
+toplot <- prune_samples(sample_sums(toplot)>=1, toplot) #remove otu with 0 reads 
+
+toplot2 <-  prune_taxa(names(sort(taxa_sums(toplot), TRUE)[1:n]),toplot) %>%
+  subset_taxa(Genus != "unknown Genus") %>% 
+  psmelt()   
+
+## Representation of the most abundant genus according to matrices
+ggplot(toplot2, aes(x = Sample, y = Abundance, fill = Genus)) + 
+  facet_grid(. ~ matrice, drop=TRUE,scale="free",space="free_x") +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = colours) +
+  theme_bw() +
+  guides(fill=guide_legend(ncol=1)) +
+  theme(axis.title.x = element_blank()) +
+  theme(axis.text.x=element_text(angle=75,hjust=0,vjust=0)) +
+  ylab(paste0("Relative Abundance"))+ 
+  theme(axis.text.x = element_text(angle=90, size = 7),legend.text = element_text( size = 7),legend.key.size = unit(0.3, "cm"),
+        legend.key.width = unit(0.3,"cm") )
+
+
+```
